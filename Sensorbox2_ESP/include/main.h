@@ -29,7 +29,7 @@
 
 
 // Settings
-#define WIFI_MODE 0                                                             // WiFi disabled
+#define WIFI_MODE 1                                                             // WiFi disabled
 #define AP_PASSWORD "00000000"                                                  // Will be overwritten by random 8 char password.
 
 // Toggle pins of the RS485 transceiver.

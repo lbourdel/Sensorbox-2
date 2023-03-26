@@ -54,6 +54,7 @@
 #include <SPIFFS.h>
 
 #include <WiFi.h>
+#include <PubSubClient.h> // LBR
 #include <AsyncTCP.h>
 #include <ESPAsyncWebServer.h>
 #include <ESPAsync_WiFiManager.h>
@@ -122,10 +123,107 @@ unsigned long ModbusTimer=0;
 unsigned char dataready=0, CTcount, DSMRver, IrmsMode = 0;
 unsigned char LedCnt, LedState, LedSeq[3] = {0,0,0};
 float Irms[3], Volts[3], IrmsCT[3];                                           // float is 32 bits
+String WifiRssi = "ABCDE";
 uint8_t datamemory = 0;
 unsigned char led = 0, Wire = WIRES4 + CW;
 uint16_t blinkram = 0, P1taskram = 0;
 bool LocalTimeSet = false;
+
+// ------------------------------------------------ MQTT -----------------------------------------------------
+// 
+// ---------------------------------------------------------------------------------------------------------------
+
+// MQTT client
+
+volatile  bool TopicArrived = false;
+const int mqttpayloadSize = 100;
+char mqttpayload [mqttpayloadSize] = {'\0'};
+String mqtttopic;
+const int mqtttopicSize = 100;
+// char mqtttopic[mqtttopicSize] = {'\0'};
+
+void mqttcallback(char* topic, byte* payload, unsigned int length) {
+//    String messageTemp[20];
+//   _LOG_A("CallBack topic:%s\n",topic);
+
+  if ( !TopicArrived )
+  {
+    memset( mqttpayload, '\0', mqttpayloadSize ); // clear payload char buffer
+    memcpy( mqttpayload, payload, length );
+
+    // memset( mqtttopic, '\0', mqtttopicSize ); // clear payload char buffer
+    // memcpy( mqtttopic, topic, mqtttopicSize );
+    mqtttopic = ""; //clear topic string buffer
+    mqtttopic = topic; //store new topic
+
+    TopicArrived = true;
+  }
+}
+
+
+// LBR
+uint16_t IMain_Linky=0;
+uint16_t Papp_Linky=0;
+
+WiFiClient wifiClient;
+PubSubClient mqttClient(wifiClient); 
+const char *mqttServer = "192.168.1.14";
+// int mqttPort = 1883;
+void setupMQTT() {
+  mqttClient.setServer(mqttServer, 1883);
+  // set the callback function
+  mqttClient.setCallback(mqttcallback);
+}
+
+void mqttreconnect() {
+//   Serial.println("Connecting to MQTT Broker...");
+  ///_LOG_D("Connecting to MQTT Broker.. LBR\n");
+  while (!mqttClient.connected()) {
+    //   Serial.println("Reconnecting to MQTT Broker..");
+      ///_LOG_A("Reconnecting to MQTT Broker.. LBR\n");
+      String clientId = "ESP32Client-";
+      clientId += String(random(0xffff), HEX);
+      
+      if (mqttClient.connect(clientId.c_str())) {
+        ///_LOG_A("Connected LBR\n");
+        // subscribe to topic
+        mqttClient.subscribe("linky/Irms");
+        mqttClient.subscribe("linky/Papp");
+      }      
+  }
+}
+
+void mqttloop()
+{
+   if(WiFi.isConnected())
+   {
+    if (!mqttClient.connected())
+        mqttreconnect();
+    
+    mqttClient.loop();
+
+    if ( TopicArrived )
+    {
+    // _LOG_A("\nmqttpayload LBR : %s",mqtttopic);
+
+    if ( mqtttopic == "linky/Irms" )
+    {
+        // _LOG_A("\nmqttpayload LBR : %s",mqttpayload);
+        IMain_Linky = atoi(mqttpayload);
+        //_LOG_D("\nlinky/Irms LBR : %i\n", IMain_Linky);
+    }
+
+    if ( mqtttopic == "linky/Papp" )
+    {
+        // _LOG_A("\nmqttpayload LBR : %s",mqttpayload);
+        Papp_Linky = atoi(mqttpayload);
+        //_LOG_D("\nlinky/Papp LBR : %i\n", Papp_Linky);
+    }
+     TopicArrived = false;
+    }
+  }
+}
+
 
 // ------------------------------------------------ Settings -----------------------------------------------------
 // 
@@ -455,7 +553,7 @@ void CTReceive() {
   while (Serial.available()) {
     ch = Serial.read();
 
-    //Serial.printf("%c",ch);
+    // Serial.printf("%c",ch);
 
     if (ch == '/') {                                                            // Start character
       CTptr = 0;
@@ -534,7 +632,8 @@ void CTReceive() {
         for (x=0; x<3 ;x++) {
           if ((IrmsCT[x] > -0.05) && (IrmsCT[x] < 0.05)) IrmsCT[x] = 0.0;
         }
-        
+        WifiRssi = WiFi.RSSI();
+
         // if selected Wire setting (3-Wire or 4-Wire) and CW and CCW phase rotation are not correctly set, we can toggle the PGC pin to set it.
         if ((CTwire != Wire) && IrmsMode == 0) {
           x = (4 + Wire - CTwire) % 4;
@@ -627,7 +726,6 @@ void P1Extract() {
   Irms[0] = (L1Power-L1PowerReturn)/Volts[0];                              		// Irms (Amps *1)
   Irms[1] = (L2Power-L2PowerReturn)/Volts[1];
   Irms[2] = (L3Power-L3PowerReturn)/Volts[2];
-  
 
   if (DSMRver >= 50) dataready |= 0x80;                                     	// P1 dataready
   else dataready |= 0x40;                                                   	// DSMR version not 5.0 !!
@@ -704,13 +802,14 @@ void P1Receive() {
 //
 void P1Task(void * parameter) {
   uint8_t socketupdate = 0;
-  char buffer[30];
+  char buffer[50];
 
   while(1) {
   
     // Check if there is new P1 data.
-    P1Receive();
-    if (!heap_caps_check_integrity_all(true)) Serial.print("\nheap error after P1 receive\n");
+    // LBR inutilisé (pas de smartMeter)
+    // P1Receive();
+    // if (!heap_caps_check_integrity_all(true)) Serial.print("\nheap error after P1 receive\n");
 
     // Check if there is a new measurement from the PIC (CT measurements)
     CTReceive();
@@ -733,7 +832,8 @@ void P1Task(void * parameter) {
 
       // CT measurement  
       } else if (datamemory & 0x03) { 
-        snprintf(buffer, sizeof(buffer), "I:%3.2f,%3.2f,%3.2f", IrmsCT[0], IrmsCT[1], IrmsCT[2]);
+        snprintf(buffer, sizeof(buffer), "I:%3.2f,%3.2f,%3.2f,%s,%d,%d", 
+          IrmsCT[0], IrmsCT[1], IrmsCT[2], WifiRssi.c_str(), IMain_Linky , Papp_Linky);
         ws.textAll(buffer);
         //ws.printfAll_P("I:%3.2f,%3.2f,%3.2f",IrmsCT[0],IrmsCT[1],IrmsCT[2]);
       }
@@ -787,6 +887,9 @@ void BlinkLed(void * parameter) {
 
       // keep track of available stack ram
       blinkram = uxTaskGetStackHighWaterMark( NULL );
+
+      mqttloop(); // LBR add mqtt client in this task
+
       // delay task for 100mS
       vTaskDelay(100 / portTICK_PERIOD_MS);
     }
@@ -1066,6 +1169,7 @@ void setup() {
   xTaskCreate(
     BlinkLed,             // Function that should be called
     "BlinkLed",           // Name of the task (for debugging)
+    // LBR 2000,                 // Stack size (bytes)
     2000,                 // Stack size (bytes)
     NULL,                 // Parameter to pass
     1,                    // Task priority
@@ -1082,6 +1186,8 @@ void setup() {
     NULL                  // Task handle
   );
 
+// LBR
+  setupMQTT();
 
   Serial.print("Configuring WDT...\n");
   esp_task_wdt_init(WDT_TIMEOUT, true);     // Setup watchdog

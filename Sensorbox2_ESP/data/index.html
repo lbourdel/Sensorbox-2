@@ -42,19 +42,31 @@
       <tbody style="transition:0.5s">
 
         <tr style="transition:0.3s">
-          <th><span class="glyphicon glyphicon-flash"></span>&nbsp;&nbsp;Power:</th>
+          <th><span class="glyphicon glyphicon-flash"></span>&nbsp;&nbsp;PLinky:</th>
+          <td id="html_PLinky" class="text-right">0&nbsp;W</td>
+        </tr>  
+        <tr style="transition:0.3s">
+          <th><span class="glyphicon glyphicon-flash"></span>&nbsp;&nbsp;ILinky:</th>
+          <td id="html_ILinky" class="text-right">0&nbsp;A</td>
+        </tr>  
+        <tr style="transition:0.3s">
+          <th><span class="glyphicon glyphicon-flash"></span>&nbsp;&nbsp;RSSI:</th>
+          <td id="html_RssiSignal" class="text-right">0&nbsp;dBm</td>
+        </tr>  
+        <tr style="transition:0.3s">
+          <th><span class="glyphicon glyphicon-flash"></span>&nbsp;&nbsp;PowerL1:</th>
           <td id="TotalPower" class="text-right">0&nbsp;W</td>
         </tr>  
         <tr style="transition:0.3s">
-          <th><span class="glyphicon glyphicon-flash"></span>&nbsp;&nbsp;L1:</th>
+          <th><span class="glyphicon glyphicon-flash"></span>&nbsp;&nbsp;L1 Main:</th>
           <td id="IrmsL1" class="text-right">0.0&nbsp;A</td>
         </tr>
         <tr style="transition:0.3s">
-          <th><span class="glyphicon glyphicon-flash"></span>&nbsp;&nbsp;L2:</th>
+          <th><span class="glyphicon glyphicon-flash"></span>&nbsp;&nbsp;L2 Jules:</th>
           <td id="IrmsL2" class="text-right">0.0&nbsp;A</td>
         </tr>
         <tr style="transition:0.3s">
-          <th><span class="glyphicon glyphicon-flash"></span>&nbsp;&nbsp;L3:</th>
+          <th><span class="glyphicon glyphicon-flash"></span>&nbsp;&nbsp;L3 EV:</th>
           <td id="IrmsL3" class="text-right">0.0&nbsp;A</td>
         </tr>
                
@@ -127,8 +139,12 @@
         IrmsL1.innerHTML = Irms1 + "&nbsp;A";
         IrmsL2.innerHTML = Irms2 + "&nbsp;A";
         IrmsL3.innerHTML = Irms3 + "&nbsp;A";
+        html_RssiSignal.innerHTML =  Irms.split(",")[3] + "&nbsp;dBm";
+        html_ILinky.innerHTML =  Irms.split(",")[4] +  "&nbsp;A";
+        html_PLinky.innerHTML =  Irms.split(",")[5] +  "&nbsp;W";
 
-        Power = Math.round((Vrms1 * Irms1) + (Vrms2 * Irms2) + (Vrms3 * Irms3));
+// LBR        Power = Math.round((Vrms1 * Irms1) + (Vrms2 * Irms2) + (Vrms3 * Irms3));
+        Power = Math.round((Vrms1 * Irms1) );
 
         if (Power < 0 ) document.getElementById("TotalPower").style.color = "green";
         else document.getElementById("TotalPower").style.color = "orange";
