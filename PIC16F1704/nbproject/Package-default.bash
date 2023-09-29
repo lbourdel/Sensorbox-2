@@ -10,9 +10,9 @@ CND_CONF=default
 CND_DISTDIR=dist
 TMPDIR=build/${CND_CONF}/${IMAGE_TYPE}/tmp-packaging
 TMPDIRNAME=tmp-packaging
-OUTPUT_PATH=dist/${CND_CONF}/${IMAGE_TYPE}/Sensorbox1_5_plus.X.${IMAGE_TYPE}.${OUTPUT_SUFFIX}
-OUTPUT_BASENAME=Sensorbox1_5_plus.X.${IMAGE_TYPE}.${OUTPUT_SUFFIX}
-PACKAGE_TOP_DIR=sensorbox15plus.x/
+OUTPUT_PATH=dist/${CND_CONF}/${IMAGE_TYPE}/PIC16F1704.${IMAGE_TYPE}.${OUTPUT_SUFFIX}
+OUTPUT_BASENAME=PIC16F1704.${IMAGE_TYPE}.${OUTPUT_SUFFIX}
+PACKAGE_TOP_DIR=pic16f1704/
 
 # Functions
 function checkReturnCode
@@ -57,15 +57,15 @@ mkdir -p ${TMPDIR}
 
 # Copy files and create directories and links
 cd "${TOP}"
-makeDirectory ${TMPDIR}/sensorbox15plus.x/bin
+makeDirectory ${TMPDIR}/pic16f1704/bin
 copyFileToTmpDir "${OUTPUT_PATH}" "${TMPDIR}/${PACKAGE_TOP_DIR}bin/${OUTPUT_BASENAME}" 0755
 
 
 # Generate tar file
 cd "${TOP}"
-rm -f ${CND_DISTDIR}/${CND_CONF}/package/sensorbox15plus.x.tar
+rm -f ${CND_DISTDIR}/${CND_CONF}/package/pic16f1704.tar
 cd ${TMPDIR}
-tar -vcf ../../../../${CND_DISTDIR}/${CND_CONF}/package/sensorbox15plus.x.tar *
+tar -vcf ../../../../${CND_DISTDIR}/${CND_CONF}/package/pic16f1704.tar *
 checkReturnCode
 
 # Cleanup
