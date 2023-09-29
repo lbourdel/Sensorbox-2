@@ -125,7 +125,7 @@ unsigned char LedCnt, LedState, LedSeq[3] = {0,0,0};
 float Irms[3], Volts[3], IrmsCT[3];                                           // float is 32 bits
 String WifiRssi = "ABCDE";
 uint8_t datamemory = 0;
-unsigned char led = 0, Wire = WIRES4 + CW;
+unsigned char led = 0, Wire = WIRESMONO + CW;
 uint16_t blinkram = 0, P1taskram = 0;
 bool LocalTimeSet = false;
 
@@ -637,15 +637,16 @@ void CTReceive() {
         WifiRssi = WiFi.RSSI();
 
         // if selected Wire setting (3-Wire or 4-Wire) and CW and CCW phase rotation are not correctly set, we can toggle the PGC pin to set it.
-        if ((CTwire != Wire) && IrmsMode == 0) {
-          x = (4 + Wire - CTwire) % 4;
-          Serial.printf("\nWire:%u CTwire:%u pulses %u\n", Wire, CTwire, x);
-          do {
-            digitalWrite (PIN_PGC, HIGH); 
-            digitalWrite (PIN_PGC, LOW); 
-            vTaskDelay(1 / portTICK_PERIOD_MS);
-          } while (--x);
-        }
+        // LBR don't change CTwire mode => MONO always
+        // if ((CTwire != Wire) && IrmsMode == 0) {
+        //   x = (4 + Wire - CTwire) % 4;
+        //   Serial.printf("\nWire:%u CTwire:%u pulses %u\n", Wire, CTwire, x);
+        //   do {
+        //     digitalWrite (PIN_PGC, HIGH); 
+        //     digitalWrite (PIN_PGC, LOW); 
+        //     vTaskDelay(1 / portTICK_PERIOD_MS);
+        //   } while (--x);
+        // }
         
         // update dataready, so the Master knows the CT's have been read with new data
         dataready |= 0x03;

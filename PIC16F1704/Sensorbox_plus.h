@@ -41,7 +41,7 @@
 #define SUPPLY_VOLTS 3.3  
 #define SUPPLY_FREQUENCY 50
                                                                                 // A three-phase system may be arranged in delta (?) or star (Y)
-#define WIRES WIRES4                                                            // 4-Wire star (Y)(L1,L2,L3 and Neutral) or delta (?) 3-Wire (L1,L2,L3, no Neutral)
+#define WIRES WIRESMONO                                                            // 4-Wire star (Y)(L1,L2,L3 and Neutral) or delta (?) 3-Wire (L1,L2,L3, no Neutral)
 #define ROTATION CW
 #define CAL 151                                                                 // Current Sensor Calibration value
 #define SAMPLES 3000 //2048
@@ -67,6 +67,7 @@
 #define CCW 1                                                                   // Rotation Left (CCW)
 #define WIRES4 0                                                                //
 #define WIRES3 2                                                                //
+#define WIRESMONO 4                                                             // LBR for mono measurements
 
 #define CONST 3.141592/180.0
 
