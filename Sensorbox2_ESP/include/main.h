@@ -26,6 +26,7 @@
 #define CCW 1                                                                   // Rotation Left (CCW)
 #define WIRES4 0                                                                //
 #define WIRES3 2                                                                //
+#define WIRESMONO 4                                                                //
 
 
 // Settings
