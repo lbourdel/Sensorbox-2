@@ -601,7 +601,7 @@ void CTReceive() {
         ret = strstr((const char *)CTstring,(const char *)"WI:");               // CT wire setting 4Wire=0, 3Wire=1 (bit1)
         if (ret != NULL) {CTwire = atoi((const char *)ret+3);                    // and phase rotation CW=0, CCW=1 (bit0)
         // LBR
-        //Serial.printf("\nWire:%u CTwire:%u \n", Wire, CTwire);
+        Serial.printf("\nWire:%u CTwire:%u \n", Wire, CTwire);
         }
         // Irms data when there is no mains plug connected.
         // There is no way of knowing the direction of the current.

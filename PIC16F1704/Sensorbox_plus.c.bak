@@ -1,0 +1,786 @@
+/*
+;   Project:       Sensorbox 1.5plus, for use with Smart EVSE
+;   Date:          02 June 2021
+;
+;   Changes:
+;   1.0  Initial release
+;
+;   (C) 2013-2021  Michael Stegen / Stegen Electronics
+;
+;	Current measurement calculations, from openenergymonitor.org
+; 
+;   set XC8 linker memory model settings to: double 32 bit, float 32 bit
+;   extended instruction set is not used on XC8
+;
+;   XC8 compiler version 2.10 is used
+;
+;   Modbus RTU slave address is fixed to 0x0A, speed is 9600 bps 
+:   
+;   Input Registers (FC=04)(Read Only):
+;  
+;   Register  Register  
+;   Address   length (16 bits)
+;   0x0000      1       Sensorbox version 1.5+          = 0x001x (2 lsb mirror the 3/4 Wire and Rotation configuration data)
+;                                                         0x0011 = 4 wire, CCW rotation
+;                                                         0x0012 = 3 wire, CW rotation      
+;                                                         0x0013 = 3 wire, CCW rotation  
+;   0x0001      1       DSMR Version(MSB), CT's (LSB)   = 0x0003                 
+;   0x0002      2       Volts L1 (32 bit floating point), Smartmeter P1 data. Unused on Sensorbox 1.5plus
+;   0x0004      2       Volts L2 (32 bit floating point), Smartmeter P1 data. Unused on Sensorbox 1.5plus
+;   0x0006      2       Volts L3 (32 bit floating point), Smartmeter P1 data. Unused on Sensorbox 1.5plus
+;   0x0008      2       Amps L1 (32 bit floating point), Smartmeter P1 data. Unused on Sensorbox 1.5plus
+;   0x000A      2       Amps L2 (32 bit floating point), Smartmeter P1 data. Unused on Sensorbox 1.5plus
+;   0x000C      2       Amps L3 (32 bit floating point), Smartmeter P1 data. Unused on Sensorbox 1.5plus
+;   0x000E      2       Amps L1 (32 bit floating point), CT imput 1
+;   0x0010      2       Amps L2 (32 bit floating point), CT input 2
+;   0x0012      2       Amps L3 (32 bit floating point), CT input 3
+;
+;   Holding Registers (FC=06)(Write):
+;
+;   Register  Register  
+;   Address   length (16 bits) 
+;   0x0800      1       Field rotation setting (bit 0)      00000000 0000000x -> 0= Rotation right 1= Rotation Left
+;                       3/4 wire configuration (bit 1)      00000000 000000x0 -> 0= 4Wire, 1= 3Wire
+;
+; 
+; 
+; Permission is hereby granted, free of charge, to any person obtaining a copy
+; of this software and associated documentation files (the "Software"), to deal
+; in the Software without restriction, including without limitation the rights
+; to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+; copies of the Software, and to permit persons to whom the Software is
+; furnished to do so, subject to the following conditions:
+;
+; The above copyright notice and this permission notice shall be included in
+; all copies or substantial portions of the Software.
+;
+; THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+; IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+; FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+; AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+; LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+; OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
+; THE SOFTWARE.
+*/
+
+#include <xc.h>
+
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <stdint.h>
+#include <math.h>
+#include "Sensorbox_plus.h"
+
+// CONFIG1
+#pragma config FOSC = INTOSC                                                    // Oscillator Selection Bits->INTOSC oscillator: I/O function on CLKIN pin
+#pragma config WDTE = OFF                                                       // Watchdog Timer Enable->WDT disabled
+#pragma config PWRTE = OFF                                                      // Power-up Timer Enable->PWRT disabled
+#pragma config MCLRE = OFF                                                      // MCLR Pin Function Select->MCLR/VPP pin function is reset input (ignored if LVP is ON)
+#pragma config CP = OFF                                                         // Flash Program Memory Code Protection->Program memory code protection is disabled
+#pragma config BOREN = OFF                                                      // Brown-out Reset Disable->Brown-out Reset disabled
+#pragma config CLKOUTEN = OFF                                                   // Clock Out Enable->CLKOUT function is disabled. I/O or oscillator function on the CLKOUT pin
+#pragma config IESO = ON                                                        // Internal/External Switchover Mode->Internal/External Switchover Mode is enabled
+#pragma config FCMEN = ON                                                       // Fail-Safe Clock Monitor Enable->Fail-Safe Clock Monitor is enabled
+
+// CONFIG2
+#pragma config WRT = OFF                                                        // Flash Memory Self-Write Protection->Write protection off
+#pragma config PPS1WAY = ON                                                     // Peripheral Pin Select one-way control->The PPSLOCK bit cannot be cleared once it is set by software
+#pragma config ZCDDIS = ON                                                      // Zero-cross detect disable->Zero-cross detect circuit is disabled at POR
+#pragma config PLLEN = ON                                                       // Phase Lock Loop enable->4x PLL is always enabled
+#pragma config STVREN = ON                                                      // Stack Overflow/Underflow Reset Enable->Stack Overflow or Underflow will cause a Reset
+#pragma config BORV = LO                                                        // Brown-out Reset Voltage Selection->Brown-out Reset Voltage (Vbor), low trip point selected.
+#pragma config LPBOR = OFF                                                      // Low-Power Brown Out Reset->Low-Power BOR is disabled
+
+#ifdef ESP_DIRECT
+#pragma config LVP = ON                                                         // Low-Voltage Programming Enable->High-voltage on MCLR/VPP is not needed for programming
+#else
+#pragma config LVP = OFF                                                        // Low-Voltage Programming Enable->High-voltage on MCLR/VPP is required for programming
+#endif
+
+
+// Global data
+
+unsigned char Modbus_TX[100], Modbus_RX[50];
+double IrmsCT[3];
+
+#ifdef CALCULATE
+double x1, x2, x3, y1, y2, y3;                                          // phase shift coefficients
+
+double i1Lead = 18.50;     // degrees that the voltage input phase error leads the c.t.1 phase error by
+double i2Lead = 18.50;     // degrees that the voltage input phase error leads the c.t.2 phase error by
+double i3Lead = 18.50;     // degrees that the voltage input phase error leads the c.t.3 phase error by
+double i1phaseshift, i2phaseshift, i3phaseshift;
+#else
+//const double y1=-1.969616, x1=2.879385, y2=-1.935576, x2=2.847993, y3=-1.901459, x3=2.816488; //36 samples
+//const double y1=-3.272029, x1=4.193797, y2=-3.215480, x2=4.139688, y3=-3.158804, x3=4.085416; //60 samples 20.00 Ilead
+const double y1=-3.114637, x1=4.043093, y2=-3.057741, x2=3.988535, y3=-3.000724, x3=3.933821; //60 samples 19.00 Ilead
+//const double y1=-2.956295, x1=3.891157, y2=-2.899069, x2=3.836167, y3=-2.841730, x3=3.781027;  //60 samples 18.00 Ilead
+//const double y1=-3.035582, x1=3.967276, y2=-2.978518, x2=3.912500, y3=-2.921338, x3=3.857570;  //60 samples 18.50 Ilead
+
+#endif
+
+unsigned char LedSeq[3] = {0,0,0};
+unsigned long Timer, LedTimer, ModbusTimer=0;				// mS counter
+unsigned char RXbyte, ADC_CH=0, dataready=0;
+unsigned char ModbusIdx=0, ModbusTXlen=0, ModbusTXidx=0;
+unsigned int T1Period=1, T1PLL=2652, sumPeriodSamples=0, PLLLock=0;          
+unsigned char newsumCycle=0;
+signed int sampleI1, sampleI2, sampleI3;
+unsigned char Phase1 = PHASE0, Phase2 = PHASE120, Phase3 = PHASE240, version = 0x10+WIRES+ROTATION;
+
+//volatile unsigned long sumVsq, sumI1sq, sumI2sq, sumI3sq;
+//volatile signed int sumVavg, sumI1avg, sumI2avg, sumI3avg;
+volatile int24_t sumPower1A, sumPower1B, sumPower2A, sumPower2B, sumPower3A, sumPower3B; 
+volatile unsigned char sumSamples, Samples;
+
+//unsigned long sumPeriodVsq, sumPeriodI1sq, sumPeriodI2sq, sumPeriodI3sq;
+//long sumPeriodVavg, sumPeriodI1avg, sumPeriodI2avg, sumPeriodI3avg;
+long sumPeriodPower1A, sumPeriodPower1B, sumPeriodPower2A, sumPeriodPower2B, sumPeriodPower3A, sumPeriodPower3B; 
+
+const signed char voltage[]= {0,6,13,19,25,31,37,42,46,50,54,57,59,61,62,62,62,61,59,57,54,50,46,42,37,31,25,19,13,6,
+                              0,-6,-13,-19,-25,-31,-37,-42,-46,-50,-54,-57,-59,-61,-62,-62,-62,-61,-59,-57,-54,-50,-46,-42,-37,-31,-25,-19,-13,-6,
+                              0,6,13,19,25,31,37,42,46,50,54,57,59,61,62,62,62,61,59,57,54,50,46,42,37,31,25,19,13,6,
+                              0,-6,-13,-19,-25,-31,-37,-42,-46,-50,-54,-57,-59,-61,-62,-62,-62,-61,-59,-57,-54,-50,-46,-42,-37,-31,-25,-19,-13,-6 };
+
+volatile uint8_t flag @ 0x70;
+
+//uint24_t square10(uint16_t);
+
+
+void __interrupt() ISR (void)
+{
+    while(PIR1bits.TMR1IF)                                                      // Timer 1 interrupt, called 60*50 times/sec for ADC measurements
+	{
+        ADCON0 = 0x0D;                                                          // Select first ADC channel (CT1)
+        ADC_CH = 0;
+        
+        T1Period++;                                                             // count cycles   
+        TMR1 = ~(T1PLL);                                                        // reset Timer 1
+        
+        if (T1Period<=NUMSAMPLES) {                                             // start ADC conversion on the selected channel.
+            ADCON0bits.ADGO = 1;                                                // ADC will generate interrupt when finished.
+        }
+       
+		PIR1bits.TMR1IF = 0;                                                    // clear Timer 1 interrupt flag
+	}
+    
+    while(IOCCFbits.IOCCF5 )                                                    // External pin (RC5) interrupt triggered 50 times/sec (50Hz) (determined by line frequency)
+    {
+//      LED_RED_ON;
+        ADCON0 = 0x0D;                                                          // Select first ADC channel (CT1)
+        ADC_CH = 0;      
+        if (T1Period>NUMSAMPLES) T1PLL+=10;                                     // Slow down timer interrupt
+        else if (T1Period<NUMSAMPLES) T1PLL-=1;                                 // Speed up timer interrupt. to make sure we sample 'NUMSAMPLES' times per period (0.02sec)
+            
+        TMR1 = ~(T1PLL);                                                        // reset Timer 1
+                
+        if (sumSamples<=NUMSAMPLES) {
+            ADCON0bits.ADGO = 1;                                                // start ADC conversion on the selected channel.        
+        } 
+        newPeriod();                                                            // Last sample in this period
+                
+        T1Period = 1;                                                           // Start with 1
+        PLLLock =0;
+        IOCCFbits.IOCCF5 = 0;                                                   // Clear interrupt flag
+        PIR1bits.TMR1IF = 0;                                                    // also clear Timer 1 interrupt flag
+//      LED_RED_OFF;
+    }
+      
+    while(PIR1bits.ADIF)                                                        // ADC conversion done interrupt
+    {
+        switch(ADC_CH)
+        {
+            case 0:                                                             // CT1
+                ADCON0 = 0x1D;                                                      // Select ADC channel CT2
+//              LED_GREEN_ON;
+                sampleI1 = ADRES;                                                  // process CT1 sample
+                sampleI1 -= 512;
+                ADC_CH = 1;
+                ADCON0bits.ADGO = 1;                                                // start ADC conversion on CT2
+//                sumI1sq += square10(abs(sampleI1));
+//                sumI1avg += sampleI1;
+                break;
+
+            case 1:       // CT2
+                ADCON0 = 0x15;                                                      // Select ADC channel CT3
+                sampleI2 = ADRES;
+                sampleI2 -= 512; 
+                ADC_CH = 2;
+                ADCON0bits.ADGO = 1;                                                // start ADC conversion on CT3
+//                sumI2sq += square10(abs(sampleI2));
+//                sumI2avg += sampleI2;
+                break;
+            
+            case 2:                                                   // CT 3
+                ADCON0 = 0x0D;                                                      // Select first ADC channel (CT1)
+                sampleI3 = ADRES;
+                sampleI3 -= 512;
+                ADC_CH = 3;
+//                sumI3sq += square10(abs(sampleI3));
+//                sumI3avg += sampleI3;
+
+//                lastV=newV;
+//                newV = voltage[T1Period-1];
+/*                
+                sumPower1A += (int)newV * sampleI1;
+                sumPower1B += (int)lastV * sampleI1;
+                sumPower2A += (int)voltage[T1Period-1+NUMSAMPLES-PHASE2] * sampleI2; // Use stored & delayed voltage for power calculation phase 2
+                sumPower2B += (int)voltage[T1Period-1+NUMSAMPLES-PHASE2-1] * sampleI2;
+                sumPower3A += (int)voltage[T1Period-1+NUMSAMPLES-PHASE3] * sampleI3; // Use stored & delayed voltage for power calculation phase 3
+                sumPower3B += (int)voltage[T1Period-1+NUMSAMPLES-PHASE3-1] * sampleI3;
+*/
+              //  sumPower1A += mul16x8s(sampleI1,newV);
+              //  sumPower1B += mul16x8s(sampleI1,lastV);
+                sumPower1A += mul16x8s(sampleI1, voltage[T1Period-1+NUMSAMPLES-Phase1]); // Use stored & delayed voltage for power calculation phase 1 (0)
+                sumPower1B += mul16x8s(sampleI1, voltage[T1Period-1+NUMSAMPLES-Phase1-1]);
+                sumPower2A += mul16x8s(sampleI2, voltage[T1Period-1+NUMSAMPLES-Phase2]); // Use stored & delayed voltage for power calculation phase 2 (120)
+                sumPower2B += mul16x8s(sampleI2, voltage[T1Period-1+NUMSAMPLES-Phase2-1]);
+                sumPower3A += mul16x8s(sampleI3, voltage[T1Period-1+NUMSAMPLES-Phase3]); // Use stored & delayed voltage for power calculation phase 3 (240)
+                sumPower3B += mul16x8s(sampleI3, voltage[T1Period-1+NUMSAMPLES-Phase3-1]);
+                
+                sumSamples++;                                                       // counts samples per period (should be NUMSAMPLES)
+//              LED_GREEN_OFF;
+                break;
+            default:
+                break;
+        }
+        if (IOCCFbits.IOCCF5) T1PLL--;                                          // if external input was triggered already the sample loop took to much time, speed up the timer
+        
+        PIR1bits.ADIF = 0;                                                      // Clear ADC interrupt flag
+    }
+    
+#ifndef ESP_DIRECT
+    while (PIR1bits.RCIF)                                                       // Uart1 receive interrupt? RS485
+    {
+        RXbyte = RCREG;                                                         // copy received byte	
+
+        if (Timer > (ModbusTimer + 3))                                          // last reception more then 3ms ago? 
+        {
+             ModbusIdx =0;                                                      // clear idx in RS485 RX handler
+        }  
+        if (ModbusIdx == 50) ModbusIdx--;                                       // max 50 bytes in buffer
+  		Modbus_RX[ModbusIdx++] = RXbyte;                                        // Store received byte in buffer
+        ModbusTimer=Timer;
+	}
+#endif
+    
+    if (PIR1bits.TXIF && PIE1bits.TXIE && TX1STAbits.TRMT)                      // Uart1 transmit interrupt? RS485
+    {                                                                           // Also check if Transmit buffer is empty (see PIC16F170x errata)
+        TXREG1 = Modbus_TX[ModbusTXidx++];
+        if (ModbusTXidx == ModbusTXlen) PIE1bits.TXIE = 0;                      // disable interrupts
+	}
+
+    // Timer 4 interrupt, called 1000 times/sec
+    while(PIR2bits.TMR4IF)                                      				// Timer 4 interrupt, called 1000 times/sec
+	{
+        Timer++;                                                                // mSec counter (overflows in 1193 hours)
+        PLLLock++;
+        if (LedTimer) LedTimer--;
+		PIR2bits.TMR4IF = 0;                                                    // clear interrupt flag
+	}
+}
+
+
+void newPeriod(void)                                                            // end of period, calculate totals
+{
+    //LED_GREEN_ON;
+    
+    if (newsumCycle==0)                 // Reset by main loop
+    {    
+        sumPeriodPower1A  += sumPower1A;
+        sumPeriodPower1B  += sumPower1B;
+        sumPeriodPower2A  += sumPower2A;
+        sumPeriodPower2B  += sumPower2B;
+        sumPeriodPower3A  += sumPower3A;
+        sumPeriodPower3B  += sumPower3B;
+        
+        sumPeriodSamples += sumSamples;                                         // add the sumsamples from this period (0.02sec) to the 1 second counter
+                                                                                // sumPeriodCounter should be around 3000 (60 samples per period * 50 cycles) per second.
+                                                                                // if a period ends early, it might be lower, this has no effect on the calculations
+        if (++Samples >= SUPPLY_FREQUENCY)                                      // 50 Cycles = 1 sec
+        {
+            newsumCycle=1;                                                      // flag to main loop to process the data
+            Samples=0;
+//            sumsamprint=sumSamples;
+        }
+    }
+    
+    sumPower1A	= 0;
+    sumPower1B	= 0;
+    sumPower2A	= 0;
+    sumPower2B	= 0;
+    sumPower3A	= 0;
+    sumPower3B	= 0;
+          
+    sumSamples=0;
+    
+}    
+
+int24_t mul16x8s(int16_t a, int8_t b)
+{
+    volatile int24_t result=0;
+
+#asm
+_asm
+
+    /* define access to bytes of the return value and parameters */
+    r3 set mul16x8s@result+2
+    r2 set mul16x8s@result+1
+    r1 set mul16x8s@result+0
+    aL set mul16x8s@a+0
+    aH set mul16x8s@a+1   
+    bL set mul16x8s@b+0
+      
+mmac MACRO A,bit, u2,u1
+	BTFSC	A,bit
+	 ADDWF	u2,F
+	RRF	u2,F
+	RRF	u1,F
+	ENDM        
+        
+    clrf    r3    
+	clrf    r2
+    clrc        
+	
+	clrf	_flag
+
+	btfss   aH,7    // msb set? then negative    
+	goto    a_pos  
+    comf    aH,f    
+	comf	aL,f    // to convert it to a positive nr.
+	incf	aL,f    
+	skipnz      
+     incf    aH,f
+	incf	_flag, f
+a_pos:
+	btfss   bL,7
+	goto    cal
+	comf    bL,f 
+	incf    bL,f 
+    incf	_flag, f        
+    
+    // done with conversion,. now start the calculation
+cal:
+    movf    bL,W
+    mmac	aL,0, r3,r1
+	mmac	aL,1, r3,r1
+	mmac	aL,2, r3,r1
+	mmac	aL,3, r3,r1
+	mmac	aL,4, r3,r1
+	mmac	aL,5, r3,r1
+	mmac	aL,6, r3,r1
+	mmac	aL,7, r3,r1
+	
+	CLRF	r2
+	// carry already clear from last RRF of mmac above
+	// 8bit multiplicand still in W
+	mmac	aH,0, r3,r2
+	mmac	aH,1, r3,r2
+	mmac	aH,2, r3,r2
+	mmac	aH,3, r3,r2
+	mmac	aH,4, r3,r2
+	mmac	aH,5, r3,r2
+	mmac	aH,6, r3,r2
+	mmac	aH,7, r3,r2
+              
+    // done with the calculation. invert result? 
+    btfss   _flag, 0
+	goto 	no_invert		
+
+    comf    r3,f
+	comf    r2,f
+	comf	r1,f
+	incf    r1,f
+	skipnz
+	 incf	r2,f
+    skipnz
+	 incf	r3,f    
+no_invert:
+
+_endasm
+#endasm
+
+    return result;
+}    
+
+/*
+double removeRMSOffset(unsigned long sumSquared, long sum, unsigned long numSamples)
+{
+    double x = ((double)sumSquared / numSamples) - ((double)sum * sum / numSamples / numSamples);
+ 
+    //printf("sumsq: %lu sum: %ld samples %lu \r\n",sumSquared, sum, numSamples );
+    
+    return (x<0.0 ? 0.0 : sqrt(x));
+}*/
+
+
+double removePowerOffset(long power, unsigned int numSamples)
+{
+    //return (((double)power / numSamples) - ((double)sumV * sumI / numSamples / numSamples));
+    return ((double)power / numSamples);
+}
+
+#ifdef CALCULATE
+double deg_rad(double a)
+{
+    return (0.01745329*a);
+}
+
+void calculateTiming(void)
+{
+  // Pre-calculate the constants for phase/timing correction
+  i1phaseshift = (0 * ADC_RATE * 3.6e-4 * SUPPLY_FREQUENCY - i1Lead); // in degrees
+  i2phaseshift = (1 * ADC_RATE * 3.6e-4 * SUPPLY_FREQUENCY - i2Lead);
+  i3phaseshift = (2 * ADC_RATE * 3.6e-4 * SUPPLY_FREQUENCY - i3Lead);  
+    
+  y1 = sin(deg_rad(i1phaseshift)) / sin(deg_rad(SAMPLERATE));
+  x1 = cos(deg_rad(i1phaseshift)) - y1 * cos(deg_rad(SAMPLERATE));
+  y2 = sin(deg_rad(i2phaseshift)) / sin(deg_rad(SAMPLERATE));
+  x2 = cos(deg_rad(i2phaseshift)) - y2 * cos(deg_rad(SAMPLERATE));
+  y3 = sin(deg_rad(i3phaseshift)) / sin(deg_rad(SAMPLERATE));
+  x3 = cos(deg_rad(i3phaseshift)) - y3 * cos(deg_rad(SAMPLERATE));
+}
+#endif
+
+
+// Poly used is x^16+x^15+x^2+x
+unsigned int CRC16(unsigned int crc, unsigned char *buf, int len)
+{
+	for (int pos = 0; pos < len; pos++)
+	{
+		crc ^= (unsigned int)buf[pos];  // XOR byte into least sig. byte of crc
+
+		for (int i = 8; i != 0; i--) {  // Loop over each bit
+			if ((crc & 0x0001) != 0) {  // If the LSB is set
+				crc >>= 1;              // Shift right and XOR 0xA001
+				crc ^= 0xA001;
+			}
+			else                        // Else LSB is not set
+				crc >>= 1;              // Just shift right
+		}
+	}
+	return crc;
+}
+
+void delay(unsigned int d)
+{
+	unsigned long x;
+	x=Timer;							// read Timer value (increased every ms)
+    while (Timer < (x+d)) { }           
+}
+                                                                                
+void RS485_Start(void)                                                          // Send buffer over RS485 line
+{
+	RS485_TRANSMIT;                                         					// set RS485 transceiver to transmit
+	delay(1);
+    
+    PIE1bits.TXIE = 1;                                                          // Enable interrupts, this will enable transmission
+}
+
+
+void initialize(void) 
+{
+    LATA = 0x00;                                                                // LATx registers
+    LATC = 0x00;
+#ifdef ESP_DIRECT
+    TRISA = 0x12;                                                               // Pins RA1 and RA4 are inputs, RA0 and RA5 are outputs
+#else
+    TRISA = 0x30;                                                               // Pins RA4-5 are inputs, RA0-1 are outputs 
+#endif    
+    TRISC = 0x2A;                                                               // Pins RC1,RC3,RC5 are inputs, RC0,RC2,RC4 are outputs
+    ANSELA = 0x15;//17;                                                              // Ansel enabled for all digital outputs, saves a bit of power
+    ANSELC = 0x0F;                                                              // 
+    WPUA = 0x00;                                                                // Weak Pull up registers
+    WPUC = 0x20;                                                                // Pull up on RC5
+    OPTION_REGbits.nWPUEN = 0;
+    IOCCN = 0x20;                                                               // Interrupt on negative edge of RC5
+    
+//    RXPPS = 0x01;                                                               // RA1->EUSART:RX;    
+    RXPPS = 0x05;                                                               // RA5->EUSART:RX;    
+    RA0PPS = 0x14;                                                              // RA0->EUSART:TX; 
+
+    OSCCON = 0x70;                                                              // SCS FOSC; SPLLEN disabled; IRCF 8MHz_HF; 
+                                                                                // setup DAC to half of VCC(3.3V) so 1.65V
+    DAC1CON0 = 0x90;                                                            // DAC1EN enabled; DAC1NSS VSS; DAC1PSS VDD; DAC1OE1 disabled; DAC1OE2 enabled; 
+    DAC1CON1 = 0x80;                                                            // DAC1R 128;
+
+                                                                                // setup the ADC
+    ADCON1 = 0xA0;                                                              // ADFM right; ADPREF VDD; ADCS FOSC/32; 
+    ADCON0 = 0x0D;                                                              // GO_nDONE stop; ADON enabled; CHS AN3; 
+    
+    OPA1CON = 0xD2;                                                             // OPA1SP High_GBWP_mode; OPA1EN enabled; OPA1PCH DAC; OPA1UG OPA_Output; 
+    
+    // uart
+    BAUD1CON = 0x08;                                                            // ABDOVF no_overflow; SCKP Non-Inverted; BRG16 16bit_generator; WUE disabled; ABDEN disabled; 
+    RC1STA = 0x90;                                                              // SPEN enabled; RX9 8-bit; CREN enabled; ADDEN disabled; SREN disabled; 
+    TX1STA = 0x24;                                                              // TX9 8-bit; TX9D 0; SENDB sync_break_complete; TXEN enabled; SYNC asynchronous; BRGH hi_speed; CSRC slave; 
+    
+#ifndef ESP_DIRECT
+    SP1BRGL = 0x40;                                                             // set baudrate to 9600 bps (832)
+    SP1BRGH = 0x03;                                                             // 
+#else    
+    SP1BRGL = 0x44;                                                             // set baudrate to 115200 bps (68)
+    SP1BRGH = 0x00;                                                             // 
+#endif    
+    //Timer1
+    T1GCON = 0;
+    TMR1 = ~(T1PLL);                                                            // Timer 1 counter value. 8Mhz * 3200 = 400uS
+                                                                                // 400us * 50 samples = 0.02s (50 samples per 50Hz period)
+    T1CON = 0b00000001;                                                         // Clock source Fosc/4, prescale 1:1, Timer 1 ON
+    
+    //Timer4
+    PR4 = 0x7C;                                                                 // Timer 4 frequency value -> 1Khz @ 32 Mhz
+    T4CON = 0x07;                                                               // Timer 4 ON, prescaler 1:64
+    
+#ifndef ESP_DIRECT
+    PIE1bits.RCIE = 1;                                                          // enable receive interrupt
+#endif    
+    PIE1bits.ADIE = 1;                                                          // enable ADC conversion done interrupt
+    PIE1bits.TMR1IE = 1;                                                        // enable timer 1 interrupt
+    PIE2bits.TMR4IE = 1;                                                        // enable timer 4 interrupt
+    INTCONbits.IOCIE = 1;                                                       // enable interrupt on I/O pin 
+    INTCONbits.PEIE = 1;                                                        // peripheral interrupts enabled
+    INTCONbits.GIE = 1;                                                         // global interrupts enabled
+}
+
+#if defined (CALCULATE) //|| defined (ESP_DIRECT)
+void putch(unsigned char byte)                                                  // user defined printf support on uart
+{
+	// output one byte on UART
+	while(!PIR1bits.TXIF || !TX1STAbits.TRMT) {}                                // wait for Transmit register to be empty
+    TX1REG = byte;
+
+}
+#endif
+
+void main(void)
+{
+    char *pBytes;
+	char x,n, wire=0;
+	unsigned int cs, crc, len;
+    unsigned char LedState=0, LedCnt=0;
+    initialize();                                       						// initialize ports, ADC, UART
+
+#ifndef ESP_DIRECT
+    LED_RED_OFF;
+    LED_GREEN_ON;                                                               // Blink GREEN
+    delay(1000);
+    LED_RED_ON;                                                                 // Blink RED
+    LED_GREEN_OFF;
+    delay(1000);
+    LED_RED_OFF;                                                                // LED's OFF
+#endif
+     
+    //printf("PIC16F1704 powerup\n");
+    
+#ifdef CALCULATE    
+    /* for (n=0;n<NUMSAMPLES*2;n++) {
+        printf("%i,",(int)(sin(n*(360/NUMSAMPLES)*CONST)*63) );
+    }*/
+    
+    calculateTiming();
+
+    printf("\n i1phaseshift %f, i2phaseshift %f, i3phaseshift %f\n",i1phaseshift,i2phaseshift,i3phaseshift);
+    printf("\nconst double y1=%f, x1=%f, y2=%f, x2=%f, y3=%f, x3=%f; \n",y1,x1,y2,x2,y3,x3);
+    
+    while(1) {}
+#else   
+    
+    while (1)
+    {
+#ifndef ESP_DIRECT             
+        while (!LedTimer && LedState) {                                         // start with state 6
+            if ((LedState-- %2) ==0) {
+                LED_GREEN_ON;
+                if (LedSeq[LedCnt++]) LED_RED_ON;
+                LedTimer = 200;
+            } else {
+                LED_GREEN_OFF;
+                LED_RED_OFF;
+                LedTimer = 200;    
+            }
+        }
+#endif        
+        if (PLLLock >= 50) {                                                    // Check if we have a lock on the 50 Hz mains input.
+            LED_RED_ON;                                                         // No, light up RED led, to indicate that there is no lock.
+            LED_GREEN_OFF;
+            LedState = 0;
+            PLLLock = 50;
+        }
+        
+       /*  while (!LedTimer) {
+            printf("T1PLL %u sumsamples :%u sumPeriodSamples %u \n",T1PLL, sumsamprint, sumPeriodSamples );
+            LedTimer=1000;
+        }*/
+        
+        
+        // sumPeriodxxx variables are updated by the ISR, and when ready the newsumCycle is set.
+        // do not use the sumPeriodxxx variables anywhere else, as the data might be updated at any moment.
+        if (newsumCycle) {
+                                                                                // Calculate Real Power for all Phases
+                                                                                // As the Vrms is based on a sine wave, and uncalibrated, the realPower
+                                                                                // value is only used to calculate the real current (including phase shift).
+#ifndef ESP_DIRECT
+            IrmsCT[CT1] = (x1 * removePowerOffset(sumPeriodPower1A, sumPeriodSamples) 
+                                  + y1 * removePowerOffset(sumPeriodPower1B, sumPeriodSamples)) / CAL;
+ 
+            IrmsCT[CT2] = (x2 * removePowerOffset(sumPeriodPower2A, sumPeriodSamples)
+                                   + y2 * removePowerOffset(sumPeriodPower2B, sumPeriodSamples)) / CAL;
+  
+            IrmsCT[CT3] = (x3 * removePowerOffset(sumPeriodPower3A, sumPeriodSamples)
+                                   + y3 * removePowerOffset(sumPeriodPower3B, sumPeriodSamples)) / CAL;
+            
+#endif
+        //   printf("T1PLL %u sumsamples :%u sumPeriodSamples %u \n",T1PLL, sumsamprint, sumPeriodSamples );
+        //   printf("Irms1 %2.1f A Irms2 %2.1f A Irms3 %2.1f A \n",IrmsCT[CT1],IrmsCT[CT2],IrmsCT[CT3]);
+                  
+#ifdef ESP_DIRECT
+            
+            sprintf(Modbus_TX,"/1A:%ld 1B:%ld 2A:%ld 2B:%ld 3A:%ld 3B:%ld SA:%u WI:%u!", sumPeriodPower1A, sumPeriodPower1B, 
+                    sumPeriodPower2A, sumPeriodPower2B, sumPeriodPower3A, sumPeriodPower3B, sumPeriodSamples, version & 3u);
+            len = strlen(Modbus_TX);
+            cs = CRC16(0, Modbus_TX, len);                                      // calculate CRC16 from data
+            sprintf(Modbus_TX+len,"%04x\r\n", cs);                              // add crc to the end of the string
+                    
+            ModbusTXlen = len+6;                                                // length of data to send
+            ModbusTXidx = 0;                                                    // points to first character to send.
+                
+            RS485_Start();                                                      // send buffer to RS485 port, using interrupts
+
+/*             old style
+             printf("/CT1: %d.%u CT2: %d.%u CT3: %d.%u %uWire!\r\n", (int)IrmsCT[CT1], (unsigned int)fabs(IrmsCT[CT1]*10)%10,
+                                                                    (int)IrmsCT[CT2], (unsigned int)fabs(IrmsCT[CT2]*10)%10,
+                                                                    (int)IrmsCT[CT3], (unsigned int)fabs(IrmsCT[CT3]*10)%10, (version & 2u) ? 3u : 4u);
+*/            
+#else
+            if (IrmsCT[CT1] < -0.1 ) LedSeq[0]=0; else LedSeq[0]=1;
+            if (IrmsCT[CT2] < -0.1 ) LedSeq[1]=0; else LedSeq[1]=1;
+            if (IrmsCT[CT3] < -0.1 ) LedSeq[2]=0; else LedSeq[2]=1;
+            
+#endif            
+            
+            sumPeriodPower1A = 0;
+            sumPeriodPower1B = 0;
+            sumPeriodPower2A = 0;
+            sumPeriodPower2B = 0;
+            sumPeriodPower3A = 0;
+            sumPeriodPower3B = 0;
+            sumPeriodSamples = 0;
+            
+          
+            // here we set the phase shifts for the next cycles
+            switch (version & 3) {
+                case 0:                                                         // 4 Wires, CW rotation
+                    Phase1 = PHASE0;
+                    Phase2 = PHASE120;
+                    Phase3 = PHASE240;
+                    break;
+                case 1:                                                         // 4 Wires, CCW rotation
+                    Phase1 = PHASE0;
+                    Phase2 = PHASE240;
+                    Phase3 = PHASE120; 
+                    break;
+                case 2:                                                         // 3 Wires, CW rotation
+                    Phase1 = PHASE30;
+                    Phase2 = PHASE150;
+                    Phase3 = PHASE270;
+                    break;
+                case 3:                                                         // 3 Wires, CCW rotation
+                    Phase1 = PHASE30;
+                    Phase2 = PHASE270;
+                    Phase3 = PHASE150;
+                    break;
+                default:
+                    break;
+            }
+            
+            newsumCycle=0;                                                      // flag ready for next cycle
+            dataready=1;
+        }
+        
+        if (RC1STAbits.OERR)                                                    // Uart1 Overrun Error?
+        {
+            RC1STAbits.CREN = 0;
+            RC1STAbits.CREN = 1;                                                // Restart Uart
+        }
+        
+        if (ModbusTXlen && TX1STAbits.TRMT && PIE1bits.TXIE==0)             	// transmit register empty and interrupt disabled ?
+        {
+            RS485_RECEIVE;                                          			// set RS485 transceiver to receive
+            ModbusTXlen = 0;                                                    // reset length
+        }
+
+#ifdef ESP_DIRECT        
+        if (PORTAbits.RA1) {                                                    // high?
+            wire = 1;
+        } else if (wire == 1) {                                                 // low and wire set?
+            version++;                                                          // then increase version.
+            wire = 0;
+            if (version == 0x14 ) version = 0x10;
+        }    
+#else
+        if ( (ModbusIdx > 6) && (Timer>(ModbusTimer+3)) )                       // last reception more then 3ms ago? 
+        {
+            crc = CRC16(0xffff, Modbus_RX, ModbusIdx);                          // calculate checksum over all data (including crc16)
+            
+            // Write to Holding registers and set Wire and rotation settings (modbus register address 0x800)
+            if (Modbus_RX[0]==0x0a && Modbus_RX[1]==0x06 && Modbus_RX[2]==0x08 && Modbus_RX[3]==0x00 && Modbus_RX[4]==0x00 && !crc)
+            {
+                version = 0x10 + (Modbus_RX[5] & 3u);                           // Set 3 or 4 Wire, and phase Rotation.
+                for (n=0; n<8; n++) Modbus_TX[n] = Modbus_RX[n];                // echo back the Write request.
+                ModbusTXlen = n;                                                // length of modbus packet
+                ModbusTXidx = 0;                                                // points to first character to send.
+                Timer = 0;
+                RS485_Start();                                                  // send buffer to RS485 port, using interrupts
+            }    
+            
+            // Request for a measurement from the SmartEVSE
+            else if (Modbus_RX[0]==0x0a && Modbus_RX[1]==0x04 && Modbus_RX[5]<=0x14 && !crc && dataready )   // check CRC
+            {                                                                   //we have received a valid request for sensorbox data
+                                                                                // Setup Modbus data
+                Modbus_TX[0]= 0x0a;                                             // Fixed Address 0x0A
+                Modbus_TX[1]= Modbus_RX[1];                                     // function byte
+                Modbus_TX[2]= Modbus_RX[5] * 2u;                                // takes the bytes from the request. 28h bytes will follow
+                Modbus_TX[3]= 0x00;                                             // 
+                Modbus_TX[4]= version;                                          // Sensorbox version 1.5+ = 0x10 plus bitmask for 3/4Wire and rotation
+                Modbus_TX[5]= 0x00;                                             // DSMR version
+                Modbus_TX[6]= 0x03;                                             // 0x03= 3CT's
+                
+                n=7;
+                for (x=0; x<(6*4) ;x++) {                                       // P1 data. Volts and Current set to 0
+                    Modbus_TX[n++] = 0;
+                }
+                
+                for (x=0; x<3 ;x++) {	
+                    pBytes = (char*)&IrmsCT[x];                                 // get raw 4 byte Double 
+                    Modbus_TX[n++] = pBytes[3];
+                    Modbus_TX[n++] = pBytes[2];
+                    Modbus_TX[n++] = pBytes[1];
+                    Modbus_TX[n++] = pBytes[0];
+                }
+                cs = CRC16(0xffff, Modbus_TX, n);                               // calculate CRC16 from data			
+                Modbus_TX[n++] = ((unsigned char)(cs));
+                Modbus_TX[n++] = ((unsigned char)(cs>>8));	
+
+                ModbusTXlen = n;                                                // length of modbus packet
+                ModbusTXidx = 0;                                                // points to first character to send.
+                Timer = 0;
+                
+                RS485_Start();                                                  // send buffer to RS485 port, using interrupts
+                dataready=0;
+           
+                LedCnt=0;                                                       // reset to first part of sequence
+                LedState=6;                                                     // 6 States, ON/OFF (3 CT's)
+                
+            }
+            
+            ModbusIdx=0;
+        }       
+#endif        
+    } // while(1)
+#endif  // CALCULATE
+}
+/*
+ End of File
+*/
