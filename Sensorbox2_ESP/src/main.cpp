@@ -71,7 +71,7 @@
 #include "main.h"
 #include "radix.h"
 #include "prg_pic.h"
-
+#include "pwd.h"
 
 const char* NTP_SERVER = "europe.pool.ntp.org";
 // Specification of the Time Zone string:
@@ -90,7 +90,7 @@ struct tm timeinfo;
 
 AsyncWebServer webServer(80);
 AsyncWebSocket ws("/ws");           // data to/from webpage
-DNSServer dnsServer;
+AsyncDNSServer dnsServer;
 IPAddress localIp;
 String APhostname = "SmartEVSE-" + String( MacId() & 0xffff, 10);           // SmartEVSE access point Name = SmartEVSE-xxxxx
 
@@ -101,7 +101,7 @@ String Router_SSID;
 String Router_Pass;
 
 // Create a ModbusRTU server and client instance on Serial1 
-ModbusServerRTU MBserver(Serial1, 2000, ToggleRS485);                        // TCP timeout set to 2000 ms
+ModbusServerRTU MBserver( 2000, ToggleRS485);                        // TCP timeout set to 2000 ms
 //ModbusClientRTU MBclient(Serial1, ToggleRS485);  
 
 Preferences preferences;
@@ -492,7 +492,10 @@ void SetupNetworkTask(void * parameter) {
     if (WIFImode == 1 && WiFi.getMode() == WIFI_OFF) {
       Serial.print("Starting WiFi..\n");
       WiFi.mode(WIFI_STA);
-      WiFi.begin();
+// MAC @ Freebox Delta Wifi 2.4Ghz = BSSID
+const uint8_t bssid_u8[6] = {0xDC,0x00,0xB0,0xA5,0x9D,0xF0}; // Repeteur Free
+      // WiFi.begin(); 
+      WiFi.begin( WIFI_SSID, WIFI_PASS, 0, bssid_u8);
     }    
 
     if (WIFImode == 0 && WiFi.getMode() != WIFI_OFF) {
@@ -634,7 +637,7 @@ void CTReceive() {
         for (x=0; x<3 ;x++) {
           if ((IrmsCT[x] > -0.05) && (IrmsCT[x] < 0.05)) IrmsCT[x] = 0.0;
         }
-        WifiRssi = WiFi.RSSI();
+        WifiRssi = WiFi.RSSI(); 
 
         // if selected Wire setting (3-Wire or 4-Wire) and CW and CCW phase rotation are not correctly set, we can toggle the PGC pin to set it.
         // LBR don't change CTwire mode => MONO always
@@ -834,7 +837,7 @@ void P1Task(void * parameter) {
         //ws.printfAll_P("V:%3d,%3d,%3d",(int)(Volts[0]),(int)(Volts[1]),(int)(Volts[2]) );
 
       // CT measurement  
-      } else if (datamemory & 0x03) { 
+      } else if (datamemory & 0x03) {
         snprintf(buffer, sizeof(buffer), "I:%3.2f,%3.2f,%3.2f,%s,%d,%d", 
           IrmsCT[0], IrmsCT[1], IrmsCT[2], WifiRssi.c_str(), IMain_Linky , Papp_Linky);
         ws.textAll(buffer);
@@ -1086,6 +1089,7 @@ void setup() {
 
   // Setup Serial ports
   Serial.begin(115200, SERIAL_8N1, PIN_PGD, PIN_TXD, false);                    // Input from TX of PIC, and debug output to USB
+  RTUutils::prepareHardwareSerial(Serial1);
   Serial1.begin(9600, SERIAL_8N1, PIN_RS485_RX, PIN_RS485_TX, false);           // Modbus connection
   Serial2.setRxBufferSize(2048);                                                // Important! first increase buffer, then setup Uart2
   Serial2.begin(115200, SERIAL_8N1, PIN_RX, -1, true);                          // P1 smartmeter connection, TX pin unused (RX inverted)
@@ -1155,7 +1159,7 @@ void setup() {
   // Register worker for address '10', function code 06
   MBserver.registerWorker(10U, WRITE_HOLD_REGISTER, &MBWriteFC06);
   // Start ModbusRTU Node background task
-  MBserver.start();
+  MBserver.begin(Serial1);
   
   
   // Create Task that handles P1 and CT data
